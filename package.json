@@ -1,0 +1,22 @@
+{
+  "name": "demand-drafting-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ME Lawyers litigation demand-letter drafting UI (Filevine + Claude). PRIVATE BUILD — no real PHI until Anthropic BAA is signed.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "mammoth": "^1.9.0",
+    "multer": "^2.2.0",
+    "pdf-parse": "^1.1.1"
+  }
+}
