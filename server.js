@@ -10,6 +10,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { fvFetch } = require('./lib/filevine');
 const { extractText } = require('./lib/extract');
 const { buildMessages } = require('./lib/prompt');
+const monitor = require('./lib/monitor');
 
 // ---------------------------------------------------------------------------
 // Step 5 — startup checks (fail fast). Never proceed without a full config,
@@ -28,6 +29,26 @@ if (missing.length) {
 
 // Standing warning, printed every startup until the BAA is confirmed signed.
 console.warn('*** BAA-PENDING: Do not use with real client PHI until the Anthropic BAA is signed and confirmed. ***');
+
+// ---------------------------------------------------------------------------
+// Inbox monitor — dormant unless MONITOR_ENABLED === 'true'. When enabled, its
+// connection vars are required (fail fast, same posture as the core config).
+// The banner makes the running mode auditable from the deploy logs.
+// ---------------------------------------------------------------------------
+const MONITOR_ENABLED = process.env.MONITOR_ENABLED === 'true';
+if (MONITOR_ENABLED) {
+  const MONITOR_REQUIRED = [
+    'MS_CLIENT_ID', 'MS_CLIENT_SECRET', 'MS_TENANT_ID',
+    'LIT_ATTORNEY_EMAILS', 'MONITOR_SENDER',
+  ];
+  const monMissing = MONITOR_REQUIRED.filter((k) => !process.env[k]);
+  if (monMissing.length) {
+    console.error('FATAL: MONITOR_ENABLED=true but missing: ' + monMissing.join(', '));
+    console.error('Refusing to start. Unset MONITOR_ENABLED to run without the monitor.');
+    process.exit(1);
+  }
+}
+console.log(`[monitor] ${monitor.modeString()}`);
 
 const IS_PROD = !!(process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT);
 const PORT = process.env.PORT || 3100;
@@ -322,10 +343,41 @@ app.post('/api/generate', requireAuth, (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Inbox monitor endpoints (all authed + no-store). Every one honors the master
+// gate: a dormant agent (MONITOR_ENABLED off) cannot be woken by a manual call.
+// ---------------------------------------------------------------------------
+function requireMonitor(req, res, next) {
+  if (!MONITOR_ENABLED) return res.status(409).json({ error: 'monitor disabled' });
+  return next();
+}
+
+app.post('/api/monitor/sync', requireAuth, requireMonitor, (req, res) => {
+  monitor.syncNow();
+  res.json({ ok: true, message: 'monitor sync started' });
+});
+
+app.get('/api/monitor/status', requireAuth, (req, res) => {
+  // Always safe to call; when dormant it reports enabled:false with zero counters.
+  res.json(monitor.getStatus());
+});
+
+app.get('/api/monitor/debug', requireAuth, requireMonitor, async (req, res) => {
+  const email = String(req.query.email || '').trim();
+  if (!email) return res.status(400).json({ error: 'email query param required' });
+  try {
+    res.json(await monitor.debugMailbox(email));
+  } catch (e) {
+    console.log(`[monitor/debug] error name=${e.name}`);
+    res.status(502).json({ error: 'debug fetch failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Static UI
 // ---------------------------------------------------------------------------
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.listen(PORT, () => {
   console.log(`[server] demand-drafting-ui listening on :${PORT} (prod=${IS_PROD})`);
+  monitor.start(); // no-op unless MONITOR_ENABLED === 'true'
 });

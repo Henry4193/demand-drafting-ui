@@ -1,3 +1,5 @@
 node_modules/
 .env
 *.log
+agent-state.json
+agent-state.json.tmp
