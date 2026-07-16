@@ -3,3 +3,5 @@ node_modules/
 *.log
 agent-state.json
 agent-state.json.tmp
+cm-agent-state.json
+cm-agent-state.json.tmp

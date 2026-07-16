@@ -11,6 +11,7 @@ const { fvFetch } = require('./lib/filevine');
 const { extractText } = require('./lib/extract');
 const { buildMessages } = require('./lib/prompt');
 const monitor = require('./lib/monitor');
+const cmMonitor = require('./lib/cm-monitor');
 
 // ---------------------------------------------------------------------------
 // Step 5 — startup checks (fail fast). Never proceed without a full config,
@@ -27,8 +28,10 @@ if (missing.length) {
   process.exit(1);
 }
 
-// Standing warning, printed every startup until the BAA is confirmed signed.
-console.warn('*** BAA-PENDING: Do not use with real client PHI until the Anthropic BAA is signed and confirmed. ***');
+// Standing reminder: the Anthropic (2026-07-13) and Filevine (2026-07-14) BAAs are
+// signed, so real PHI is permitted — but ONLY through the dedicated BAA-track key.
+// This process must run that key, never a non-BAA (chase-ui/webhook) key.
+console.log('[baa] Anthropic + Filevine BAAs signed — real PHI permitted via the BAA-track key ONLY. Verify ANTHROPIC_API_KEY is the BAA/LIT-console key.');
 
 // ---------------------------------------------------------------------------
 // Inbox monitor — dormant unless MONITOR_ENABLED === 'true'. When enabled, its
@@ -49,6 +52,23 @@ if (MONITOR_ENABLED) {
   }
 }
 console.log(`[monitor] ${monitor.modeString()}`);
+
+// ---------------------------------------------------------------------------
+// CM Action Router — dormant unless CM_MONITOR_ENABLED === 'true'. Requires only
+// what's needed to READ the inbox (so dry-run calibration can run before Teams is
+// configured); CM_TEAMS_CHAT_ID is checked at post time, not startup.
+// ---------------------------------------------------------------------------
+const CM_MONITOR_ENABLED = process.env.CM_MONITOR_ENABLED === 'true';
+if (CM_MONITOR_ENABLED) {
+  const CM_REQUIRED = ['MS_CLIENT_ID', 'MS_CLIENT_SECRET', 'MS_TENANT_ID', 'CM_MONITOR_MAILBOX'];
+  const cmMissing = CM_REQUIRED.filter((k) => !process.env[k]);
+  if (cmMissing.length) {
+    console.error('FATAL: CM_MONITOR_ENABLED=true but missing: ' + cmMissing.join(', '));
+    console.error('Refusing to start. Unset CM_MONITOR_ENABLED to run without the CM monitor.');
+    process.exit(1);
+  }
+}
+console.log(`[cm-monitor] ${cmMonitor.modeString()}`);
 
 const IS_PROD = !!(process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT);
 const PORT = process.env.PORT || 3100;
@@ -373,6 +393,37 @@ app.get('/api/monitor/debug', requireAuth, requireMonitor, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// CM Action Router endpoints (authed + no-store). Same posture as the inbox
+// monitor: a dormant agent (CM_MONITOR_ENABLED off) can't be woken by a call.
+// ---------------------------------------------------------------------------
+function requireCmMonitor(req, res, next) {
+  if (!CM_MONITOR_ENABLED) return res.status(409).json({ error: 'cm monitor disabled' });
+  return next();
+}
+
+app.post('/api/cm-monitor/sync', requireAuth, requireCmMonitor, (req, res) => {
+  cmMonitor.syncNow();
+  res.json({ ok: true, message: 'cm monitor sync started' });
+});
+
+app.get('/api/cm-monitor/status', requireAuth, (req, res) => {
+  res.json(cmMonitor.getStatus());
+});
+
+// Calibration: routing chain on real mail. ?classify=1 also runs the Claude
+// classifier per email (obeys the dry-run / BAA_SIGNED gate). No Teams posts either way.
+app.get('/api/cm-monitor/debug', requireAuth, requireCmMonitor, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
+    const classify = req.query.classify === '1' || req.query.classify === 'true';
+    res.json(await cmMonitor.debugRoute(limit, classify));
+  } catch (e) {
+    console.log(`[cm-monitor/debug] error name=${e.name}`);
+    res.status(502).json({ error: 'debug fetch failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Static UI
 // ---------------------------------------------------------------------------
 app.use(express.static(path.join(__dirname, 'public')));
@@ -380,4 +431,5 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.listen(PORT, () => {
   console.log(`[server] demand-drafting-ui listening on :${PORT} (prod=${IS_PROD})`);
   monitor.start(); // no-op unless MONITOR_ENABLED === 'true'
+  cmMonitor.start(); // no-op unless CM_MONITOR_ENABLED === 'true'
 });
