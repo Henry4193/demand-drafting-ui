@@ -152,7 +152,7 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/me', (req, res) => {
-  res.json({ authed: !!(req.session && req.session.authed), baaPending: true });
+  res.json({ authed: !!(req.session && req.session.authed) });
 });
 
 function requireAuth(req, res, next) {
