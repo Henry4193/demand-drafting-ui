@@ -462,6 +462,67 @@ app.post('/api/teams/relay', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Queued-alert poller — pulls Teams alerts from ld-to-fv-webhook and posts them
+// to the chat. This app owns the only DELEGATED token that can post to a Teams
+// chat (Graph forbids app-only chat posting), but it has no public domain and
+// lives in a different Railway project, so nothing can call in. Outbound is
+// unrestricted, so we pull instead of being pushed to.
+//
+// Read and ack are separate calls: a failed post is left queued and retried on
+// the next poll rather than silently dropped.
+// ---------------------------------------------------------------------------
+const ALERT_POLL_URL = (process.env.ALERT_POLL_URL || '').replace(/\/$/, '');
+const ALERT_POLL_MINUTES = Math.max(1, parseInt(process.env.ALERT_POLL_MINUTES || '5', 10));
+
+async function pollQueuedAlerts() {
+  const chatId = process.env.TEAMS_RELAY_CHAT_ID;
+  const secret = process.env.TEAMS_RELAY_SECRET;
+  if (!ALERT_POLL_URL || !chatId || !secret) return;
+
+  let alerts;
+  try {
+    const r = await fetch(`${ALERT_POLL_URL}/api/teams/pending`, {
+      headers: { 'x-relay-secret': secret },
+    });
+    if (!r.ok) {
+      console.log(`[alert-poll] fetch failed ${r.status}` +
+        (r.status === 401 ? ' — TEAMS_RELAY_SECRET does not match the webhook side' : ''));
+      return;
+    }
+    ({ alerts } = await r.json());
+  } catch (e) {
+    console.log(`[alert-poll] fetch error: ${e.message}`);
+    return;
+  }
+  if (!Array.isArray(alerts) || alerts.length === 0) return;
+
+  const posted = [];
+  for (const a of alerts) {
+    try {
+      await postChatMessage(chatId, a.html);
+      posted.push(a.id);
+    } catch (e) {
+      // Leave it queued; the next poll retries.
+      console.log(`[alert-poll] post failed for ${a.id}: ${e.message}`);
+    }
+  }
+  if (!posted.length) return;
+
+  try {
+    await fetch(`${ALERT_POLL_URL}/api/teams/ack`, {
+      method: 'POST',
+      headers: { 'x-relay-secret': secret, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: posted }),
+    });
+    console.log(`[alert-poll] posted ${posted.length} alert(s)`);
+  } catch (e) {
+    // Posted but not acked — they redeliver next poll. A duplicate ping is
+    // preferable to a dropped deadline alert.
+    console.log(`[alert-poll] ack failed (${e.message}) — may repost next cycle`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Static UI
 // ---------------------------------------------------------------------------
 app.use(express.static(path.join(__dirname, 'public')));
@@ -470,4 +531,12 @@ app.listen(PORT, () => {
   console.log(`[server] demand-drafting-ui listening on :${PORT} (prod=${IS_PROD})`);
   monitor.start(); // no-op unless MONITOR_ENABLED === 'true'
   cmMonitor.start(); // no-op unless CM_MONITOR_ENABLED === 'true'
+
+  if (ALERT_POLL_URL && process.env.TEAMS_RELAY_CHAT_ID && process.env.TEAMS_RELAY_SECRET) {
+    console.log(`[alert-poll] enabled — every ${ALERT_POLL_MINUTES}m from ${ALERT_POLL_URL}`);
+    setTimeout(pollQueuedAlerts, 20_000); // first pass shortly after boot
+    setInterval(pollQueuedAlerts, ALERT_POLL_MINUTES * 60 * 1000);
+  } else {
+    console.log('[alert-poll] off — needs ALERT_POLL_URL + TEAMS_RELAY_CHAT_ID + TEAMS_RELAY_SECRET');
+  }
 });
