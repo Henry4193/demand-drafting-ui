@@ -12,6 +12,7 @@ const { extractText } = require('./lib/extract');
 const { buildMessages } = require('./lib/prompt');
 const monitor = require('./lib/monitor');
 const cmMonitor = require('./lib/cm-monitor');
+const { postChatMessage } = require('./lib/graph');
 
 // ---------------------------------------------------------------------------
 // Step 5 — startup checks (fail fast). Never proceed without a full config,
@@ -420,6 +421,43 @@ app.get('/api/cm-monitor/debug', requireAuth, requireCmMonitor, async (req, res)
   } catch (e) {
     console.log(`[cm-monitor/debug] error name=${e.name}`);
     res.status(502).json({ error: 'debug fetch failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Teams relay — lets a sibling service (ld-to-fv-webhook) post into a Teams
+// CHAT. Graph forbids app-only chat posting (403, migration-only
+// Teamwork.Migrate.All), and this app already owns the DELEGATED token, so it
+// is the only place that can. Handing that refresh token to a second service
+// would break both (it rotates on use), hence a relay rather than a copy.
+//
+// Machine-to-machine: shared secret, not the session cookie above. The target
+// chat is fixed by env — a caller cannot choose an arbitrary chat, so a leaked
+// secret cannot be used to message anywhere else.
+// ---------------------------------------------------------------------------
+app.post('/api/teams/relay', async (req, res) => {
+  const secret = process.env.TEAMS_RELAY_SECRET;
+  const chatId = process.env.TEAMS_RELAY_CHAT_ID;
+  if (!secret || !chatId) {
+    return res.status(503).json({ error: 'relay not configured' });
+  }
+  const provided = req.headers['x-relay-secret'];
+  if (typeof provided !== 'string' || !safeEqual(provided, secret)) {
+    console.log(`[teams-relay] unauthorized ip-hash=${ipHash(req.ip || 'unknown')}`);
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  const html = req.body && req.body.html;
+  if (typeof html !== 'string' || !html.trim()) {
+    return res.status(400).json({ error: 'html required' });
+  }
+  try {
+    await postChatMessage(chatId, html);
+    console.log('[teams-relay] posted');
+    res.json({ ok: true });
+  } catch (e) {
+    // postChatMessage throws with the real Graph status.
+    console.log(`[teams-relay] post failed: ${e.message}`);
+    res.status(502).json({ error: 'post failed' });
   }
 });
 
